@@ -1,0 +1,76 @@
+name: Daily Spotify Playlist Update
+
+on:
+  schedule:
+    # MODIFIED: Trigger at both 7:00 and 8:00 UTC every day.
+    # The job will have logic to only proceed at the correct local time.
+    - cron: '0 7,8 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-playlists:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # NEW: This step checks if it's currently midnight in the Pacific Timezone
+      - name: Check Time in Target Timezone
+        id: check_time # Give the step an ID to reference its outputs
+        run: |
+          import os
+          from datetime import datetime
+          import pytz
+
+          # Set the target timezone
+          tz = pytz.timezone('America/Los_Angeles')
+          
+          # Get the current time in the target timezone
+          local_time = datetime.now(tz)
+          
+          print(f"Current time in {tz} is {local_time.strftime('%Y-%m-%d %H:%M:%S')}")
+          
+          # Check if the current hour is midnight (0)
+          if local_time.hour == 0:
+            print("It's midnight. Proceeding with the job.")
+            # This special syntax sets an output for the step
+            print("should_run=true" >> os.environ.get("GITHUB_OUTPUT"))
+          else:
+            print("It's not midnight yet. Skipping the rest of the job.")
+            print("should_run=false" >> os.environ.get("GITHUB_OUTPUT"))
+
+      # MODIFIED: This step now runs ONLY if the check_time step set should_run to 'true'
+      - name: Run On This Day script
+        if: steps.check_time.outputs.should_run == 'true'
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_DATABASE: ${{ secrets.DB_DATABASE }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+        run: python on_this_day.py
+
+      # MODIFIED: This step also runs ONLY if the check_time step set should_run to 'true'
+      - name: Run Random Day script
+        if: steps.check_time.outputs.should_run == 'true'
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_DATABASE: ${{ secrets.DB_DATABASE }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+        run: python random_day.py

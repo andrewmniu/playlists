@@ -2,10 +2,17 @@ name: Daily Spotify Playlist Update
 
 on:
   schedule:
-    # MODIFIED: Trigger at both 7:00 and 8:00 UTC every day.
-    # The job will have logic to only proceed at the correct local time.
+    # Trigger at both 7:00 and 8:00 UTC every day.
     - cron: '0 7,8 * * *'
+  
+  # MODIFIED: Add an 'input' to the manual trigger
   workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Force run scripts regardless of time'
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   update-playlists:
@@ -35,7 +42,6 @@ jobs:
           tz = pytz.timezone('America/Los_Angeles')
           local_time = datetime.now(tz)
           
-          # This line is now fixed: it uses double-quotes inside the f-string, which is valid Python.
           print(f'Current time in {tz} is {local_time.strftime("%Y-%m-%d %H:%M:%S")}')
           
           should_run = local_time.hour == 0
@@ -49,9 +55,9 @@ jobs:
               print(f'should_run={str(should_run).lower()}', file=f)
           EOF
 
-      # MODIFIED: This step now runs ONLY if the check_time step set should_run to 'true'
+      # MODIFIED: The 'if' condition is now smarter
       - name: Run On This Day script
-        if: steps.check_time.outputs.should_run == 'true'
+        if: (github.event.schedule && steps.check_time.outputs.should_run == 'true') || (github.event.inputs.force_run == true)
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
@@ -62,9 +68,9 @@ jobs:
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
         run: python on_this_day.py
 
-      # MODIFIED: This step also runs ONLY if the check_time step set should_run to 'true'
+      # MODIFIED: The 'if' condition is now smarter
       - name: Run Random Day script
-        if: steps.check_time.outputs.should_run == 'true'
+        if: (github.event.schedule && steps.check_time.outputs.should_run == 'true') || (github.event.inputs.force_run == true)
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}

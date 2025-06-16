@@ -55,9 +55,8 @@ jobs:
               print(f'should_run={str(should_run).lower()}', file=f)
           EOF
 
-      # MODIFIED: The 'if' condition is now smarter
       - name: Run On This Day script
-        if: (github.event.schedule && steps.check_time.outputs.should_run == 'true') || (github.event.inputs.force_run == true)
+        if: (github.event_name == 'schedule' && steps.check_time.outputs.should_run == 'true') || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_run == true)
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
@@ -68,9 +67,8 @@ jobs:
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
         run: python on_this_day.py
 
-      # MODIFIED: The 'if' condition is now smarter
       - name: Run Random Day script
-        if: (github.event.schedule && steps.check_time.outputs.should_run == 'true') || (github.event.inputs.force_run == true)
+        if: (github.event_name == 'schedule' && steps.check_time.outputs.should_run == 'true') || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_run == true)
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}

@@ -24,10 +24,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      # NEW: This step checks if it's currently midnight in the Pacific Timezone
       - name: Check Time in Target Timezone
         id: check_time # Give the step an ID to reference its outputs
         run: |
+          python -c "
           import os
           from datetime import datetime
           import pytz
@@ -38,16 +38,20 @@ jobs:
           # Get the current time in the target timezone
           local_time = datetime.now(tz)
           
-          print(f"Current time in {tz} is {local_time.strftime('%Y-%m-%d %H:%M:%S')}")
+          print(f'Current time in {tz} is {local_time.strftime(\'%Y-%m-%d %H:%M:%S\')}')
           
           # Check if the current hour is midnight (0)
-          if local_time.hour == 0:
-            print("It's midnight. Proceeding with the job.")
-            # This special syntax sets an output for the step
-            print("should_run=true" >> os.environ.get("GITHUB_OUTPUT"))
+          should_run = local_time.hour == 0
+
+          if should_run:
+              print('It\'s midnight. Proceeding with the job.')
           else:
-            print("It's not midnight yet. Skipping the rest of the job.")
-            print("should_run=false" >> os.environ.get("GITHUB_OUTPUT"))
+              print('It\'s not midnight yet. Skipping the rest of the job.')
+          
+          # This is the robust way to set an output variable for subsequent steps
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              print(f'should_run={str(should_run).lower()}', file=f)
+          "
 
       # MODIFIED: This step now runs ONLY if the check_time step set should_run to 'true'
       - name: Run On This Day script

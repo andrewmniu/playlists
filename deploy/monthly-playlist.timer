@@ -1,0 +1,9 @@
+[Unit]
+Description=Run monthly top-tracks playlist on the 1st at local midnight
+
+[Timer]
+OnCalendar=*-*-01 00:00:00 America/Los_Angeles
+Persistent=true
+
+[Install]
+WantedBy=timers.target

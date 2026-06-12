@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Spotify playlists (yesteryear + random)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=andrew
+WorkingDirectory=/home/andrew/music-dashboard
+EnvironmentFile=/home/andrew/music-dashboard/app.env
+ExecStart=/home/andrew/music-dashboard/venv/bin/python playlists/on_this_day.py
+ExecStart=/home/andrew/music-dashboard/venv/bin/python playlists/random_day.py
+ExecStart=/home/andrew/music-dashboard/venv/bin/python playlists/unabridged.py

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Spotify listening-history ingestion hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

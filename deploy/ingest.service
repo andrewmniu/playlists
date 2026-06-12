@@ -1,0 +1,11 @@
+[Unit]
+Description=Spotify listening-history ingestion (hourly)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=andrew
+WorkingDirectory=/home/andrew/music-dashboard/ingest
+EnvironmentFile=/home/andrew/music-dashboard/app.env
+ExecStart=/home/andrew/music-dashboard/venv/bin/python ingest_history.py

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run daily Spotify playlists just after local midnight
+
+[Timer]
+# Pacific local time; systemd >= 252 supports a timezone in OnCalendar.
+OnCalendar=*-*-* 00:00:00 America/Los_Angeles
+Persistent=true
+
+[Install]
+WantedBy=timers.target

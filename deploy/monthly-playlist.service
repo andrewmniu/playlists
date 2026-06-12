@@ -1,0 +1,11 @@
+[Unit]
+Description=Monthly top-tracks playlist (previous month)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=andrew
+WorkingDirectory=/home/andrew/music-dashboard
+EnvironmentFile=/home/andrew/music-dashboard/app.env
+ExecStart=/home/andrew/music-dashboard/venv/bin/python playlists/monthly_top.py

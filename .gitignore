@@ -7,3 +7,5 @@ dumps/
 state/
 .DS_Store
 **/.DS_Store
+
+.claude/

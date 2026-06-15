@@ -21,29 +21,23 @@ PLAYLIST_ID = "2eImE8S0JZBnHZwCafDtII"
 STATE_FILE = Path(__file__).resolve().parent.parent / "state" / "unabridged.ids"
 
 QUERY = """
-WITH canonical_tracks AS (
-    SELECT name, album, artist, MIN(id) AS canonical_id
-    FROM tracks
-    GROUP BY name, album, artist
-),
-ranked AS (
-    SELECT ct.canonical_id AS id,
+-- tracks.id is already canonical (isrc-deduped in migration 0004), so no
+-- runtime name/album/artist collapsing is needed. Keep tracks with >= 10 plays
+-- and order by 5th-play time (most recent first). spotify_id is resolved here
+-- since the Spotify API speaks spotify ids; surrogate id is the stable tiebreaker.
+WITH ranked AS (
+    SELECT h.track_id,
            h.played_at,
-           ROW_NUMBER() OVER (PARTITION BY ct.canonical_id ORDER BY h.played_at) AS listen_number
-    FROM history h
-    JOIN tracks t ON h.track_id = t.id
-    JOIN canonical_tracks ct
-      ON t.name = ct.name AND t.album = ct.album AND t.artist = ct.artist
+           ROW_NUMBER() OVER (PARTITION BY h.track_id ORDER BY h.played_at) AS listen_number
+    FROM v2.history h
+    WHERE h.user_id = 1
 )
--- One pass: keep tracks with >= 10 plays (HAVING) and order by 5th-play time.
--- The original's ranked-JOIN-qualifying did this filter as a join, which the
--- planner turned into a 549M-row nested loop; HAVING avoids it entirely.
--- id is a deterministic tiebreaker so the order is stable across runs.
-SELECT id
-FROM ranked
-GROUP BY id
+SELECT t.spotify_id
+FROM ranked r
+JOIN v2.tracks t ON t.id = r.track_id
+GROUP BY r.track_id, t.spotify_id
 HAVING COUNT(*) >= 10
-ORDER BY MAX(CASE WHEN listen_number = 5 THEN played_at END) DESC, id
+ORDER BY MAX(CASE WHEN r.listen_number = 5 THEN r.played_at END) DESC, r.track_id
 """
 
 

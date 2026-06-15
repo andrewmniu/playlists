@@ -22,7 +22,9 @@ def get_after_ms(conn):
     and .timestamp() yields the correct epoch directly. Returns None on an
     empty table (first run grabs the latest 50).
     """
-    row = conn.execute("SELECT MAX(played_at) FROM history").fetchone()
+    row = conn.execute(
+        "SELECT MAX(played_at) FROM v2.history WHERE user_id = 1"
+    ).fetchone()
     if not row or row[0] is None:
         return None
     return int((row[0].timestamp() + 1) * 1000)
@@ -135,19 +137,8 @@ def main():
             ))
 
         with conn.cursor() as cur:
-            # Legacy raw tables (public.*) — still the source the dashboard reads.
-            cur.executemany(
-                "INSERT INTO tracks (id, name, album, artist) "
-                "VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-                [(r[1], r[2], r[3], r[4]) for r in rows],
-            )
-            cur.executemany(
-                "INSERT INTO history (played_at, track_id) "
-                "VALUES (%s, %s) ON CONFLICT (played_at) DO NOTHING",
-                [(r[0], r[1]) for r in rows],
-            )
-            # Normalized v2.* (dual-write during migration). Same transaction, so
-            # public and v2 stay consistent; one fails -> both roll back.
+            # Write the normalized v2 schema. The raw public.* tables were dropped
+            # after the migration cutover; v2 is the single source of truth now.
             for item in items:
                 upsert_v2(cur, item)
         conn.commit()

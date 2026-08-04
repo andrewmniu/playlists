@@ -1,8 +1,11 @@
 [Unit]
 # Rebuilds the derived v2.album_listens / v2.album_pass_state tables from
-# v2.history. They are NOT maintained incrementally by ingest, so without this
-# timer they silently go stale -- they sat ~7 weeks out of date once, which read
-# as "album counting is broken" in the dashboard's Favorites tab.
+# v2.history. They are NOT maintained incrementally, so left alone they go stale
+# silently -- they sat ~7 weeks out of date once, which read as "album counting
+# is broken" in the dashboard's Favorites tab.
+#
+# No timer of its own: ingest.service triggers this via OnSuccess=, so it tracks
+# v2.history hourly instead of trailing it by up to a day. Full rebuild, ~2s.
 Description=Rebuild derived album-listen tables from history
 After=network-online.target postgresql.service
 Wants=network-online.target

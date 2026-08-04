@@ -3,6 +3,11 @@ Description=Spotify listening-history ingestion (hourly)
 After=network-online.target postgresql.service
 Wants=network-online.target
 OnFailure=notify-failure@%n.service
+# v2.album_listens is derived from v2.history, so rebuild it whenever new plays
+# land rather than on a timer of its own -- otherwise the dashboard's Favorites
+# tab trails the History tab. Only on success: if ingest failed there are no new
+# plays to account for, and its own OnFailure alert already fired.
+OnSuccess=album-listens.service
 
 [Service]
 Type=oneshot

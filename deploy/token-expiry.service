@@ -1,0 +1,10 @@
+[Unit]
+Description=Warn before the Spotify refresh token expires
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=andrew
+EnvironmentFile=/home/andrew/music-dashboard/app.env
+ExecStart=/home/andrew/music-dashboard/deploy/token-expiry-check.sh

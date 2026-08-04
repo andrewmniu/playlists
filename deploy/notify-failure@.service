@@ -1,0 +1,10 @@
+[Unit]
+# Instantiated by OnFailure=notify-failure@%n.service on the job units, so %i is
+# the name of the unit that failed (e.g. "ingest.service").
+Description=Send an ntfy alert that %i failed
+
+[Service]
+Type=oneshot
+User=andrew
+EnvironmentFile=/home/andrew/music-dashboard/app.env
+ExecStart=/home/andrew/music-dashboard/deploy/notify.sh unit-failed %i

@@ -11,7 +11,7 @@ and reads the same Postgres database.
 
 | Path | What it is |
 |------|------------|
-| `ingest/` | Hourly job: pulls recently-played tracks from Spotify into Postgres (`ingest_history.py`). Timestamps stored as canonical UTC. |
+| `ingest/` | Hourly job: pulls recently-played tracks from Spotify into Postgres (`ingest_history.py`). Timestamps stored as canonical UTC. Also `backfill_export.py` (fill gaps from a Spotify extended-streaming-history export) and `build_album_listens.py` (daily rebuild of the derived `album_listens`/`album_pass_state` tables). |
 | `playlists/` | Playlist jobs that read Postgres and update Spotify: `on_this_day.py` (yesteryear, daily), `random_day.py` (random past day, daily), `unabridged.py` (everything played ≥10×, daily, diff-synced), `monthly_top.py` (top 30 of last month, 1st of month). Shared helpers in `db.py`, Spotify client in `spotify_client.py`. |
 | `migrations/` | Postgres schema migrations (RDS→PG lift-and-shift, then UTC conversion). |
 | `deploy/` | `setup-server.sh` (one-time VPS bootstrap) and the systemd `.service`/`.timer` units. |

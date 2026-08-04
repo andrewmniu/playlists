@@ -53,13 +53,16 @@ def _release_date(album):
     return d
 
 
-def upsert_v2(cur, item):
+def upsert_v2(cur, item, source="spotify"):
     """Insert one play into the normalized v2 schema (artists->albums->tracks->
     track_artists->history), resolving canonical identity by isrc/spotify_id.
 
     Artist identity is the name (matches the 0003 backfill); album by spotify_id;
     track canonically by isrc (so a regional-dup spotify id maps to the existing
     track) and only inserted under its own spotify id when the isrc is new/unknown.
+
+    `source` tags the history row; backfill_export.py passes 'spotify_export' so
+    imported plays stay distinguishable from hourly-ingested ones.
     """
     track = item["track"]
     artist = track["artists"][0]
@@ -109,8 +112,8 @@ def upsert_v2(cur, item):
 
     cur.execute(
         """INSERT INTO v2.history (user_id, played_at, track_id, source)
-           VALUES (1, %s, %s, 'spotify') ON CONFLICT (user_id, played_at) DO NOTHING""",
-        (parse_played_at(item["played_at"]), track_id),
+           VALUES (1, %s, %s, %s) ON CONFLICT (user_id, played_at) DO NOTHING""",
+        (parse_played_at(item["played_at"]), track_id, source),
     )
 
 

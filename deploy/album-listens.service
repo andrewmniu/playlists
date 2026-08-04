@@ -1,0 +1,19 @@
+[Unit]
+# Rebuilds the derived v2.album_listens / v2.album_pass_state tables from
+# v2.history. They are NOT maintained incrementally by ingest, so without this
+# timer they silently go stale -- they sat ~7 weeks out of date once, which read
+# as "album counting is broken" in the dashboard's Favorites tab.
+#
+# Source of truth for the script is music-dashboard/backend/build_album_listens.py;
+# the copy here is deployed to the VPS.
+Description=Rebuild derived album-listen tables from history
+After=network-online.target postgresql.service
+Wants=network-online.target
+OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+User=andrew
+WorkingDirectory=/home/andrew/music-dashboard
+EnvironmentFile=/home/andrew/music-dashboard/app.env
+ExecStart=/home/andrew/music-dashboard/venv/bin/python build_album_listens.py

@@ -12,6 +12,7 @@ from datetime import datetime
 
 import psycopg
 
+from album_editions import ALBUM_MIN_TRACKS
 from spotify import Spotify
 
 
@@ -53,6 +54,39 @@ def _release_date(album):
     return d
 
 
+def _upgrade_album(cur, track_id, album_id, album):
+    """Move an existing track onto this release if it's the better home.
+
+    Identity is the isrc, so a song released as a single ahead of its album
+    resolves to the row created for the single -- and used to keep that row's
+    1-track album forever, stranding the song off the record it belongs to
+    (Reality Awaits sat at 7 of 9 tracks this way). When the album turns up
+    later, take it.
+
+    Deliberately one-directional: only a single-length release gets upgraded, so
+    two full editions of the same record can't fight over a track and rewrite
+    album_id on every play. Choosing between *those* is the backfill's job
+    (enrich_album_editions.py), where play counts are in view.
+    """
+    if (album.get("total_tracks") or 0) < ALBUM_MIN_TRACKS:
+        return
+    row = cur.execute(
+        """UPDATE v2.tracks t SET album_id = %s, updated_at = now()
+           FROM v2.albums a
+           WHERE t.id = %s AND a.id = t.album_id AND t.album_id <> %s
+             AND coalesce(a.total_tracks, 0) < %s
+           RETURNING a.id""",
+        (album_id, track_id, album_id, ALBUM_MIN_TRACKS),
+    ).fetchone()
+    if row:
+        cur.execute(
+            """INSERT INTO v2.track_album_repairs
+                   (track_id, old_album_id, new_album_id, reason)
+               VALUES (%s, %s, %s, 'ingest: single superseded by album')""",
+            (track_id, row[0], album_id),
+        )
+
+
 def upsert_v2(cur, item, source="spotify"):
     """Insert one play into the normalized v2 schema (artists->albums->tracks->
     track_artists->history), resolving canonical identity by isrc/spotify_id.
@@ -77,14 +111,16 @@ def upsert_v2(cur, item, source="spotify"):
 
     album = track["album"]
     cur.execute(
-        """INSERT INTO v2.albums (spotify_id, name, artist_id, image_url, release_date, total_tracks)
-           VALUES (%s, %s, %s, %s, %s, %s)
+        """INSERT INTO v2.albums (spotify_id, name, artist_id, image_url, release_date,
+                                  total_tracks, album_type)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (spotify_id) DO UPDATE
              SET total_tracks = EXCLUDED.total_tracks,
+                 album_type = COALESCE(EXCLUDED.album_type, v2.albums.album_type),
                  image_url = COALESCE(v2.albums.image_url, EXCLUDED.image_url)
            RETURNING id""",
         (album["id"], album["name"], artist_id, _album_image(album),
-         _release_date(album), album.get("total_tracks")),
+         _release_date(album), album.get("total_tracks"), album.get("album_type")),
     )
     album_id = cur.fetchone()[0]
 
@@ -94,6 +130,7 @@ def upsert_v2(cur, item, source="spotify"):
         row = cur.execute("SELECT id FROM v2.tracks WHERE isrc = %s", (isrc,)).fetchone()
         if row:
             track_id = row[0]
+            _upgrade_album(cur, track_id, album_id, album)
     if track_id is None:
         cur.execute(
             """INSERT INTO v2.tracks (spotify_id, isrc, name, album_id, duration_ms, preview_url)

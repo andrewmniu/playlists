@@ -16,4 +16,10 @@ Type=oneshot
 User=andrew
 WorkingDirectory=/home/andrew/music-dashboard/ingest
 EnvironmentFile=/home/andrew/music-dashboard/app.env
+# N comes from albums.core_tracks, which only Spotify can supply, so top up any
+# album heard for the first time since the last run before counting. --new-only
+# scopes it to those: a handful of requests, usually none. The "-" prefix keeps
+# a Spotify outage from blocking the rebuild -- it just falls back to
+# total_tracks for those albums until a later run fills them in.
+ExecStartPre=-/home/andrew/music-dashboard/venv/bin/python enrich_album_editions.py --new-only
 ExecStart=/home/andrew/music-dashboard/venv/bin/python build_album_listens.py

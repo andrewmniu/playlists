@@ -3,13 +3,26 @@ Populate v2.album_listens and v2.album_pass_state from v2.history.
 
 Algorithm (sequential coverage, time-agnostic):
   For each album, process its plays in chronological order.
-  N = distinct tracks ever heard from the album (floor: N >= MIN_N).
+  N = the album's real length: core_tracks (the standard edition, padding
+      excluded) falling back to total_tracks. Albums shorter than
+      ALBUM_MIN_TRACKS are singles and are skipped, as are albums Spotify never
+      gave us a length for.
   Maintain a "pass" (set of unique tracks seen so far).
   When a repeat track triggers len(seen)/N >= COVER:
     - Close the pass → insert a row in album_listens
     - Start a new pass with the triggering track
   At end-of-history: if remaining pass has coverage >= COVER, close it too.
   Whatever is left in-progress is saved in album_pass_state.
+
+N is Spotify's number, never "distinct tracks I happened to hear". Deriving N
+from the history makes coverage self-fulfilling -- one song off a record played
+35 times is 35 passes at 1/1 -- which is the whole bias this counter exists to
+remove. The cost of honesty is that half-listened albums score 0, which is
+correct: they were never listened to.
+
+Plays of padding (v2.tracks.is_variant -- the live and demo takes a deluxe
+appends past the standard edition) are dropped rather than counted toward a
+pass, so a bonus disc can't stand in for the album.
 
 Idempotent: truncates both tables before re-inserting, in one transaction.
 
@@ -25,9 +38,11 @@ import os, sys
 from collections import defaultdict
 import psycopg
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from album_editions import ALBUM_MIN_TRACKS
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 COVER   = 0.6
-MIN_N   = 7
 USER_ID = 1
 
 
@@ -40,13 +55,17 @@ def run():
             JOIN v2.tracks  t ON t.id = h.track_id
             WHERE h.user_id = %s
               AND t.album_id IS NOT NULL
+              AND NOT t.is_variant
             ORDER BY h.played_at
         """, [USER_ID]).fetchall()
-        print(f"  {len(rows):,} play-rows loaded")
+        print(f"  {len(rows):,} play-rows loaded (padding tracks excluded)")
 
-        # Load album total_tracks for N calculation
-        album_meta = dict(conn.execute("""
-            SELECT id, total_tracks FROM v2.albums WHERE total_tracks IS NOT NULL
+        # N per album: the standard edition's length, falling back to the whole
+        # tracklist when there is no padding to strip.
+        album_n = dict(conn.execute("""
+            SELECT id, coalesce(core_tracks, total_tracks)
+            FROM v2.albums
+            WHERE coalesce(core_tracks, total_tracks) IS NOT NULL
         """).fetchall())
 
         # Group plays by album_id, preserving chronological order
@@ -56,27 +75,18 @@ def run():
 
         print(f"  {len(album_plays):,} distinct albums in history")
 
-        # Compute N per album = distinct tracks ever heard (capped at total_tracks)
-        album_n: dict[int, int] = {}
-        for album_id, plays in album_plays.items():
-            distinct = len({t for t, _ in plays})
-            total = album_meta.get(album_id)
-            if total is None:
-                n = distinct
-            else:
-                n = min(distinct, total)  # can't hear more distinct than exist
-            album_n[album_id] = n
-
-        eligible = sum(1 for n in album_n.values() if n >= MIN_N)
-        print(f"  {eligible:,} albums eligible (N >= {MIN_N})")
+        unknown = sum(1 for a in album_plays if a not in album_n)
+        eligible = sum(1 for a in album_plays if album_n.get(a, 0) >= ALBUM_MIN_TRACKS)
+        print(f"  {eligible:,} albums eligible (N >= {ALBUM_MIN_TRACKS}); "
+              f"{unknown:,} skipped for unknown length")
 
         # Run the algorithm
         listen_rows   = []  # (user_id, album_id, started_at, ended_at, distinct, total, n, coverage)
         pass_state_rows = []  # (user_id, album_id, seen_track_ids[], pass_started_at, last_played_at)
 
         for album_id, plays in album_plays.items():
-            n = album_n[album_id]
-            if n < MIN_N:
+            n = album_n.get(album_id, 0)
+            if n < ALBUM_MIN_TRACKS:
                 continue
 
             seen        = set()
@@ -157,13 +167,14 @@ def run():
         # ── Sanity-check summary ──────────────────────────────────────────────
         print("\nTop 15 albums by listen count:")
         top = conn.execute("""
-            SELECT ar.name, al.name, count(*) AS listens, al.total_tracks,
+            SELECT ar.name, al.name, count(*) AS listens,
+                   coalesce(al.core_tracks, al.total_tracks) AS n,
                    round(avg(al2.coverage)::numeric, 2) AS avg_cov
             FROM v2.album_listens al2
             JOIN v2.albums al ON al.id = al2.album_id
             JOIN v2.artists ar ON ar.id = al.artist_id
             WHERE al2.user_id = %s
-            GROUP BY ar.name, al.name, al.total_tracks
+            GROUP BY ar.name, al.name, n
             ORDER BY listens DESC
             LIMIT 15
         """, [USER_ID]).fetchall()

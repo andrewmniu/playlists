@@ -464,6 +464,79 @@ def pass_b(conn, api, albums, tracklists, dry_run):
     return moves
 
 
+# ── Pass C: point re-homed tracks at their album's own Spotify id ─────────────
+
+def align_track_ids(conn, api, albums, tracklists, dry_run):
+    """Give every re-homed track the Spotify id its new album uses for it.
+
+    Pass B moves album_id, but spotify_id keeps pointing at the release the
+    track was first ingested from -- and spotify_id is the only column the
+    playlist jobs send to Spotify. So a song filed under Reality Awaits still
+    went into playlists as the single, under the single's cover.
+
+    Scoped to tracks Pass B actually moved. Plenty of other rows carry an id
+    from a different regional release of the album they're already filed under,
+    but swapping those changes the id without changing the album anyone sees.
+    """
+    by_id = {a["id"]: a for a in albums}
+    moved = conn.execute("""
+        SELECT DISTINCT t.id, t.spotify_id, t.isrc, t.album_id, t.name
+        FROM v2.track_album_repairs r
+        JOIN v2.tracks t ON t.id = r.track_id
+        WHERE t.isrc IS NOT NULL AND t.isrc <> ''
+    """).fetchall()
+
+    stale = [m for m in moved
+             if m[3] in tracklists
+             and m[1] not in {sid for sid, _ in tracklists[m[3]]}]
+    print(f"\nPass C — {len(moved):,} re-homed tracks, {len(stale):,} still on the "
+          f"old release's id")
+    if not stale:
+        return
+
+    sids = sorted({sid for m in stale for sid, _ in tracklists[m[3]]})
+    print(f"  resolving isrcs for {len(sids):,} tracks on their new albums")
+    isrcs = api.track_isrcs(sids)
+
+    updates, unmatched = [], 0
+    for track_id, old_sid, isrc, album_id, name in stale:
+        want = next((sid for sid, _ in tracklists[album_id] if isrcs.get(sid) == isrc), None)
+        if not want:
+            unmatched += 1          # album carries a different recording of it
+            continue
+        updates.append((track_id, old_sid, want, album_id, name))
+
+    print(f"  {len(updates):,} ids to realign ({unmatched:,} not on the new album "
+          f"under the same isrc)")
+    for track_id, old_sid, new_sid, album_id, name in updates[:10]:
+        print(f"    {name[:38]:38} {old_sid} -> {new_sid}  {by_id[album_id]['name'][:28]}")
+    if dry_run:
+        return
+
+    applied = taken = 0
+    with conn.cursor() as cur:
+        for track_id, old_sid, new_sid, album_id, name in updates:
+            # spotify_id is unique. If the album's id is already on another row,
+            # leave this one alone rather than merging two tracks by side effect.
+            row = cur.execute(
+                """UPDATE v2.tracks SET spotify_id = %s, updated_at = now()
+                   WHERE id = %s AND NOT EXISTS (
+                       SELECT 1 FROM v2.tracks o WHERE o.spotify_id = %s AND o.id <> %s)
+                   RETURNING id""",
+                (new_sid, track_id, new_sid, track_id)).fetchone()
+            if row:
+                applied += 1
+                cur.execute(
+                    """INSERT INTO v2.track_id_realignments
+                           (track_id, old_spotify_id, new_spotify_id, album_id)
+                       VALUES (%s,%s,%s,%s)""",
+                    (track_id, old_sid, new_sid, album_id))
+            else:
+                taken += 1
+    conn.commit()
+    print(f"  realigned {applied:,}" + (f"; {taken:,} skipped, id already in use" if taken else ""))
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def load_albums(conn, limit, new_only=False):
@@ -501,6 +574,7 @@ def main():
         tracklists = pass_a(conn, api, albums, args.dry_run)
         albums += adopt_primary_editions(conn, api, albums, tracklists, args.dry_run)
         pass_b(conn, api, albums, tracklists, args.dry_run)
+        align_track_ids(conn, api, albums, tracklists, args.dry_run)
     print("\ndone" + (" (dry run — nothing written)" if args.dry_run else ""))
 
 

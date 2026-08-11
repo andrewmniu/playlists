@@ -54,7 +54,7 @@ def _release_date(album):
     return d
 
 
-def _upgrade_album(cur, track_id, album_id, album):
+def _upgrade_album(cur, track_id, album_id, album, track_spotify_id):
     """Move an existing track onto this release if it's the better home.
 
     Identity is the isrc, so a song released as a single ahead of its album
@@ -70,13 +70,21 @@ def _upgrade_album(cur, track_id, album_id, album):
     """
     if (album.get("total_tracks") or 0) < ALBUM_MIN_TRACKS:
         return
+    # spotify_id moves with album_id. It is what the playlist jobs push to
+    # Spotify, so leaving it behind files the song under the album here while
+    # playlists still add the single, under the single's cover. Skipped if the
+    # album's id already belongs to another row -- the column is unique, and
+    # merging two tracks as a side effect of a play is not this function's job.
     row = cur.execute(
-        """UPDATE v2.tracks t SET album_id = %s, updated_at = now()
+        """UPDATE v2.tracks t SET album_id = %s, updated_at = now(),
+                  spotify_id = CASE WHEN EXISTS (
+                      SELECT 1 FROM v2.tracks o WHERE o.spotify_id = %s AND o.id <> t.id)
+                      THEN t.spotify_id ELSE %s END
            FROM v2.albums a
            WHERE t.id = %s AND a.id = t.album_id AND t.album_id <> %s
              AND coalesce(a.total_tracks, 0) < %s
-           RETURNING a.id""",
-        (album_id, track_id, album_id, ALBUM_MIN_TRACKS),
+           RETURNING a.id, t.spotify_id""",
+        (album_id, track_spotify_id, track_spotify_id, track_id, album_id, ALBUM_MIN_TRACKS),
     ).fetchone()
     if row:
         cur.execute(
@@ -130,7 +138,7 @@ def upsert_v2(cur, item, source="spotify"):
         row = cur.execute("SELECT id FROM v2.tracks WHERE isrc = %s", (isrc,)).fetchone()
         if row:
             track_id = row[0]
-            _upgrade_album(cur, track_id, album_id, album)
+            _upgrade_album(cur, track_id, album_id, album, track["id"])
     if track_id is None:
         cur.execute(
             """INSERT INTO v2.tracks (spotify_id, isrc, name, album_id, duration_ms, preview_url)

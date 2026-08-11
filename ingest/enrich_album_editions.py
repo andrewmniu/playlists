@@ -42,8 +42,9 @@ from collections import defaultdict
 import psycopg
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from album_editions import (ALBUM_MIN_TRACKS, edition_rank, is_variant_title,
-                            split_edition, standard_edition_tracks)
+from album_editions import (ALBUM_MIN_TRACKS, base_album_name, edition_rank,
+                            is_secondary_edition, is_variant_title, split_edition,
+                            standard_edition_tracks)
 
 # Same fallback the other backfill uses: creds and DSN live in the dashboard's
 # .env locally, and are supplied by app.env on the VPS.
@@ -74,10 +75,10 @@ class Api:
     def __init__(self, cache_path=None):
         self.token = self._token()
         self.cache_path = cache_path
-        self.cache = {"albums": {}, "isrcs": {}}
+        self.cache = {"albums": {}, "isrcs": {}, "artist_albums": {}}
         if cache_path and os.path.exists(cache_path):
             with open(cache_path) as f:
-                self.cache = json.load(f)
+                self.cache.update(json.load(f))
             print(f"cache: {len(self.cache['albums']):,} albums, "
                   f"{len(self.cache['isrcs']):,} isrcs")
 
@@ -136,6 +137,23 @@ class Api:
                                  [(t["id"], t["name"]) for t in items])
                 self.cache["albums"][al["id"]] = out[al["id"]]
             _progress("  albums", i + len(batch), 20, len(todo))
+        self.save_cache()
+        return out
+
+    def artist_albums(self, artist_sid):
+        """Every album release Spotify lists for an artist."""
+        if artist_sid in self.cache["artist_albums"]:
+            return self.cache["artist_albums"][artist_sid]
+        out, url = [], f"artists/{artist_sid}/albums?include_groups=album&limit=50&market=US"
+        while url:
+            page = self.get(url)
+            out += [{"id": a["id"], "name": a["name"], "album_type": a["album_type"],
+                     "total_tracks": a["total_tracks"], "release_date": a.get("release_date"),
+                     "release_date_precision": a.get("release_date_precision"),
+                     "images": a.get("images") or []}
+                    for a in page["items"]]
+            url = page.get("next")
+        self.cache["artist_albums"][artist_sid] = out
         self.save_cache()
         return out
 
@@ -229,12 +247,20 @@ def pass_a(conn, api, albums, dry_run):
         flagged = unflagged = 0
         for album_id, sids in padding_by_album.items():
             names = [t for sid, t in tracklists[album_id] if sid in sids]
+            # Restricted to rows the tracklist accounts for. Pass B parks the
+            # odd stray here -- a commentary track re-homed from another
+            # edition, say -- and it is padding on its own title's evidence;
+            # rewriting it from a tracklist it was never on would clear that.
+            known_sids = [sid for sid, _ in tracklists[album_id]]
+            known_names = [t for _, t in tracklists[album_id]]
             cur.execute(
                 """UPDATE v2.tracks SET is_variant = (spotify_id = ANY(%s) OR name = ANY(%s))
                    WHERE album_id = %s
+                     AND (spotify_id = ANY(%s) OR name = ANY(%s))
                      AND is_variant <> (spotify_id = ANY(%s) OR name = ANY(%s))
                    RETURNING is_variant""",
-                (list(sids), names, album_id, list(sids), names))
+                (list(sids), names, album_id, known_sids, known_names,
+                 list(sids), names))
             changed = [r[0] for r in cur.fetchall()]
             flagged += sum(changed)
             unflagged += len(changed) - sum(changed)
@@ -247,6 +273,107 @@ def pass_a(conn, api, albums, dry_run):
         print(f"  padding flags: +{flagged:,} / -{unflagged + cur.rowcount:,}")
     conn.commit()
     return tracklists
+
+
+# ── Pass A2: pull in album-proper editions that were never played ─────────────
+
+def _norm_date(d, prec):
+    if not d or not d[:4].isdigit() or int(d[:4]) < 1:
+        return None
+    return f"{d[:4]}-01-01" if prec == "year" else (f"{d[:7]}-01" if prec == "month" else d)
+
+
+def adopt_primary_editions(conn, api, albums, tracklists, dry_run):
+    """Add the album proper for any secondary edition that is standing in for one.
+
+    Pass B can only re-home a track onto a release the user has played, which
+    leaves a hole: if the *only* edition ever played is the commentary version,
+    there is nothing better to move to and it keeps the album's identity. Laura
+    Stevenson's "Sit Resist (Commentary Version)" held all 1,227 plays of Sit
+    Resist, which does exist on Spotify -- as a release we'd simply never seen.
+
+    So for those, ask Spotify for the plain edition and insert it. It arrives
+    with no plays, which is fine: edition_rank puts the album proper above a
+    secondary edition before play counts are consulted at all.
+    """
+    targets = [a for a in albums
+               if a["plays"] > 0 and a["artist_spotify_id"]
+               and is_secondary_edition(a["name"])]
+    print(f"\nPass A2 — {len(targets):,} secondary editions holding plays")
+
+    known = {a["spotify_id"] for a in albums}
+    adopted = []
+    for a in targets:
+        base = base_album_name(a["name"])
+        want = a["core_tracks"] or 0
+        options = [c for c in api.artist_albums(a["artist_spotify_id"])
+                   if (c["total_tracks"] or 0) >= ALBUM_MIN_TRACKS
+                   and not is_secondary_edition(c["name"])
+                   and base_album_name(c["name"]) == base]
+        # The release matching the length we worked out for the record, else the
+        # leanest: every other edition of a record is longer than the record.
+        # Taking the fullest instead drags in expanded reissues -- a 19-track
+        # "Begin to Hope" for a 13-track album.
+        options.sort(key=lambda c: (c["total_tracks"] != want, c["total_tracks"]))
+        # Only ever the best option, and only if we don't already have it. Taking
+        # the next-best when the best is already ours doesn't converge: each run
+        # would adopt one more edition of the same record for ever.
+        if options and options[0]["id"] not in known:
+            adopted.append((a, options[0]))
+            known.add(options[0]["id"])
+
+    print(f"  {len(adopted):,} album-proper editions to bring in")
+    for a, pick in adopted[:15]:
+        print(f"    {a['artist']} — {pick['name']} ({pick['total_tracks']}tr) "
+              f"for {a['name'][:40]}")
+    if not adopted:
+        return []
+
+    # Insert, or adopt the row we already have -- an album proper with no plays
+    # is invisible to load_albums, so a release can be sitting in v2.albums and
+    # still be unavailable to Pass B. That is exactly the Sit Resist case.
+    existing = dict(conn.execute(
+        "SELECT spotify_id, id FROM v2.albums WHERE spotify_id IS NOT NULL").fetchall())
+    new_albums = []
+    with conn.cursor() as cur:
+        for a, pick in adopted:
+            imgs = pick["images"]
+            img = (imgs[1]["url"] if len(imgs) > 1 else imgs[0]["url"]) if imgs else None
+            if dry_run:
+                # No write, but still resolve an id so Pass B can report the
+                # moves this would cause. A release we don't have yet gets a
+                # placeholder, which never reaches the database.
+                row = (existing.get(pick["id"], -len(new_albums) - 1),)
+            else:
+                row = cur.execute(
+                    """INSERT INTO v2.albums (spotify_id, name, artist_id, image_url,
+                                              release_date, total_tracks, album_type)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT (spotify_id) DO UPDATE
+                         SET total_tracks = EXCLUDED.total_tracks,
+                             album_type = coalesce(EXCLUDED.album_type, v2.albums.album_type),
+                             image_url = coalesce(v2.albums.image_url, EXCLUDED.image_url)
+                       RETURNING id""",
+                    (pick["id"], pick["name"], a["artist_id"], img,
+                     _norm_date(pick["release_date"], pick["release_date_precision"]),
+                     pick["total_tracks"], pick["album_type"])).fetchone()
+            new_albums.append({
+                "id": row[0], "spotify_id": pick["id"], "name": pick["name"],
+                "total_tracks": pick["total_tracks"], "core_tracks": None,
+                "album_type": pick["album_type"], "artist_id": a["artist_id"],
+                "artist_spotify_id": a["artist_spotify_id"], "artist": a["artist"],
+                "plays": 0, "adopted": True,
+            })
+    if dry_run:
+        conn.rollback()
+    else:
+        conn.commit()
+
+    for al in new_albums:
+        got = api.album_tracklists([al["spotify_id"]]).get(al["spotify_id"])
+        if got:
+            tracklists[al["id"]] = got[2]
+    return new_albums
 
 
 # ── Pass B: re-home orphans ───────────────────────────────────────────────────
@@ -275,10 +402,11 @@ def pass_b(conn, api, albums, tracklists, dry_run):
     # floor keeps barely-touched reissues out and the sweep down to one request
     # per 50 tracks of plausible homes.
     candidates = [a for a in albums
-                  if a["plays"] >= CANDIDATE_MIN_PLAYS
+                  if (a["plays"] >= CANDIDATE_MIN_PLAYS or a.get("adopted"))
                   and (a["core_tracks"] or a["total_tracks"] or 0) >= ALBUM_MIN_TRACKS
                   and a["id"] in tracklists]
-    print(f"  {len(candidates):,} candidate albums (>= {CANDIDATE_MIN_PLAYS} plays)")
+    print(f"  {len(candidates):,} candidate albums (>= {CANDIDATE_MIN_PLAYS} plays "
+          f"or newly adopted)")
 
     sids = sorted({sid for a in candidates for sid, _ in tracklists[a["id"]]})
     print(f"  resolving isrcs for {len(sids):,} of their tracks")
@@ -308,8 +436,11 @@ def pass_b(conn, api, albums, tracklists, dry_run):
 
     print(f"  {len(moves):,} tracks to re-home "
           f"({unmatched:,} appear on no played album, left alone)")
+    # Ranked by what the track is being taken *off*, not what it lands on: an
+    # album proper adopted this run has no plays yet, so sorting by destination
+    # buries the very corrections worth eyeballing.
     for track_id, old, new, name in sorted(
-            moves, key=lambda m: -by_id[m[2]]["plays"])[:15]:
+            moves, key=lambda m: -by_id[m[1]]["plays"])[:15]:
         print(f"    {name[:34]:34} {by_id[old]['name'][:24]:24} -> {by_id[new]['name'][:30]}")
 
     if dry_run or not moves:
@@ -338,17 +469,18 @@ def pass_b(conn, api, albums, tracklists, dry_run):
 def load_albums(conn, limit, new_only=False):
     rows = conn.execute(f"""
         SELECT al.id, al.spotify_id, al.name, al.total_tracks, al.core_tracks,
-               al.album_type, al.artist_id, ar.name AS artist, count(h.*) AS plays
+               al.album_type, al.artist_id, ar.name AS artist,
+               ar.spotify_id AS artist_spotify_id, count(h.*) AS plays
         FROM v2.albums al
         JOIN v2.artists ar ON ar.id = al.artist_id
         JOIN v2.tracks t   ON t.album_id = al.id
         JOIN v2.history h  ON h.track_id = t.id AND h.user_id = %s
         {"WHERE al.album_type IS NULL" if new_only else ""}
-        GROUP BY al.id, ar.name
+        GROUP BY al.id, ar.name, ar.spotify_id
         ORDER BY plays DESC
     """, [USER_ID]).fetchall()
     cols = ["id", "spotify_id", "name", "total_tracks", "core_tracks",
-            "album_type", "artist_id", "artist", "plays"]
+            "album_type", "artist_id", "artist", "artist_spotify_id", "plays"]
     albums = [dict(zip(cols, r)) for r in rows]
     return albums[:limit] if limit else albums
 
@@ -367,6 +499,7 @@ def main():
         albums = load_albums(conn, args.limit, args.new_only)
         print(f"{len(albums):,} albums with plays")
         tracklists = pass_a(conn, api, albums, args.dry_run)
+        albums += adopt_primary_editions(conn, api, albums, tracklists, args.dry_run)
         pass_b(conn, api, albums, tracklists, args.dry_run)
     print("\ndone" + (" (dry run — nothing written)" if args.dry_run else ""))
 

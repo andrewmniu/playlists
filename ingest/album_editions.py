@@ -9,7 +9,8 @@ album-listen coverage divides by.
 
 Two rules, both taken from how the listening actually looks:
   - Prefer the release the user plays as an album: real albums over singles,
-    the standard edition over the deluxe, then whichever has more plays.
+    the album proper over a deluxe or a commentary version, then whichever has
+    more plays.
   - An album's length is its *standard* edition. A deluxe that appends 20 live
     takes to 12 studio songs is a 12-track album with padding, not a 32-track
     album, and the padding is not part of a listen.
@@ -52,12 +53,30 @@ BOX_SET_MIN_RATIO = 1.5
 VARIANT_TAIL_RATIO = 0.8
 
 # Editions that pad a standard album. Deliberately excludes "remaster": a
-# remastered reissue is the standard album, same tracklist.
+# remastered reissue is the standard album, same tracklist. These words are
+# never an album title on their own, so they count anywhere in the name.
 DELUXE_RE = re.compile(
     r"""\b(
           deluxe | expanded | anniversary | legacy \s+ edition
         | special \s+ edition | collector'?s | complete \s+ edition
         | bonus \s+ track \s+ version
+    )\b""",
+    re.X | re.I,
+)
+
+# Alternate *formats* of a record -- the album with the band talking over it,
+# the backing tracks, the pitch-shifted reissue. Not padding, but not the
+# release anyone means by the album's name either.
+#
+# Only counted inside a qualifier, unlike DELUXE_RE: these are perfectly good
+# album titles on their own. Adrianne Lenker's "instrumentals", Molly Sarlé's
+# "Karaoke Angel" and Jodi's "Karaoke" are records, not formats of one.
+ALT_FORMAT_RE = re.compile(
+    r"""\b(
+          commentary | track \s+ by \s+ track
+        | karaoke | instrumentals? | a[\s-]?cappella
+        | sped[\s-]?up | slowed | backing \s+ track
+        | live                       # "hopeless fountain kingdom (Live From Webster Hall)"
     )\b""",
     re.X | re.I,
 )
@@ -115,8 +134,13 @@ def is_variant_title(title: str) -> bool:
     )
 
 
-def is_deluxe(album_name: str) -> bool:
-    return bool(album_name and DELUXE_RE.search(album_name))
+def is_secondary_edition(album_name: str) -> bool:
+    """True for a release that isn't the album proper: a deluxe, or an
+    alternate format like the commentary or karaoke version."""
+    if not album_name:
+        return False
+    return bool(DELUXE_RE.search(album_name)) or any(
+        ALT_FORMAT_RE.search(q) for q in _qualifiers(album_name))
 
 
 _TRAILING_QUALIFIER_RE = re.compile(r"\s*[(\[][^)\]]*[)\]]\s*$|\s[-–—]\s[^-–—]*$")
@@ -210,9 +234,10 @@ def edition_rank(name: str, album_type: str | None, core_tracks: int | None,
     """Sort key (descending = better) for choosing which release owns a track.
 
     Ordered the way the rules read: an album beats a single outright, an
-    original beats a greatest-hits compilation, a standard edition beats a
-    deluxe, and only then does play count -- "the version I've listened to the
-    most" -- break the tie, with the longer tracklist last as a stable fallback.
+    original beats a greatest-hits compilation, the album proper beats a deluxe
+    or a commentary version, and only then does play count -- "the version I've
+    listened to the most" -- break the tie, with the longer tracklist last as a
+    stable fallback.
 
     Length, not album_type, draws the album/single line: Spotify files most EPs
     under album_type='single', so trusting the type would keep EPs from ever
@@ -222,7 +247,7 @@ def edition_rank(name: str, album_type: str | None, core_tracks: int | None,
     return (
         n >= ALBUM_MIN_TRACKS,
         album_type != "compilation",
-        not is_deluxe(name),
+        not is_secondary_edition(name),
         plays,
         n,
     )
@@ -254,8 +279,17 @@ if __name__ == "__main__":
     DELUXES = [
         ("Lucinda Williams (Deluxe Edition)", True),
         ("Sour (Bonus Track Version)", True),
+        ("Sit Resist (Commentary Version)", True),
+        ("The Carpenter(Commentary Version)", True),
+        ("Close The Distance (With Commentary)", True),
+        ("Half-Light (The Instrumentals)", True),
         ("Is This It", False),
         ("Blonde on Blonde (Remastered)", False),
+        # real records, not formats of one -- the marker only counts as a
+        # qualifier, so a bare title keeps its place
+        ("Karaoke Angel", False),
+        ("instrumentals", False),
+        ("Music of the Night: Instrumental Piano", False),
     ]
     # 12 studio songs then 20 live ones: the shape core_tracks exists to find.
     LUCINDA = ([(f"s{i}", f"Song {i}") for i in range(12)]
@@ -290,9 +324,9 @@ if __name__ == "__main__":
             fails += 1
             print(f"is_variant_title({title!r}) != {want}")
     for name, want in DELUXES:
-        if is_deluxe(name) != want:
+        if is_secondary_edition(name) != want:
             fails += 1
-            print(f"is_deluxe({name!r}) != {want}")
+            print(f"is_secondary_edition({name!r}) != {want}")
     for label, (total, tracks), want in [
         ("padded deluxe", (32, LUCINDA), 12),
         ("mostly-marked tail", (37, RUMOURS), 12),
